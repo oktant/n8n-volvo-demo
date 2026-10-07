@@ -1,0 +1,17 @@
+services:
+  n8n:
+    image: docker.io/n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=Europe/Stockholm
+      - TZ=Europe/Stockholm
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data: 

@@ -1,0 +1,177 @@
+{
+  "name": "Fetch Source",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "5dccfd54-ad8e-4482-8dc2-68f856792c3e",
+      "name": "When called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -512,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d5000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.type }}",
+              "rightValue": "rss",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8a5d3dd5-c8be-487b-82aa-b4d3173af29b",
+      "name": "Is RSS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -256,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "98fa6579-4000-42b6-a2f4-0d2ef55886f2",
+      "name": "Read RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-tech-digest/1.0"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "763c2bd0-d925-4137-99c0-a00f2c017a4e",
+      "name": "Fetch JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns whatever the fetch step returned into a common story format.\n// Always returns at least one item, so the main workflow never gets nothing back.\nconst src = $('When called').first().json;\n\nconst toTime = (value) => {\n  const t = Date.parse(value);\n  return Number.isNaN(t) ? null : t;\n};\n\nconst errorText = (e) =>\n  typeof e === 'string' ? e : (e && (e.message || e.description)) || JSON.stringify(e);\n\nconst stories = [];\nlet error = null;\n\nfor (const { json: j } of $input.all()) {\n  if (!j || Object.keys(j).length === 0) continue; // empty item from \"Always Output Data\"\n  if (j.error) {\n    error = errorText(j.error);\n    continue;\n  }\n\n  if (Array.isArray(j.hits)) {\n    // Hacker News (Algolia API)\n    for (const h of j.hits) {\n      stories.push({\n        title: h.title,\n        url: h.url || `https://news.ycombinator.com/item?id=${h.objectID}`,\n        published: h.created_at_i ? h.created_at_i * 1000 : toTime(h.created_at),\n        points: h.points ?? 0,\n      });\n    }\n  } else if (j.short_id && j.title) {\n    // Lobsters (one item per story)\n    stories.push({\n      title: j.title,\n      url: j.url || j.comments_url,\n      published: toTime(j.created_at),\n      points: j.score ?? 0,\n    });\n  } else if (j.title && j.link) {\n    // RSS / Atom item\n    stories.push({\n      title: j.title,\n      url: j.link,\n      published: toTime(j.isoDate || j.pubDate),\n      points: null, // RSS has no popularity data\n    });\n  }\n}\n\nconst valid = stories.filter(s => s.title && s.url);\n\nif (valid.length === 0) {\n  return [{ json: { source: src.name, failed: true, error: error || 'No stories returned' } }];\n}\n\nreturn valid.map(s => ({ json: { source: src.name, ...s } }));\n"
+      },
+      "id": "5369d4d9-462e-4e00-978f-23cd994e72b3",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        128
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When called": {
+      "main": [
+        [
+          {
+            "node": "Is RSS?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is RSS?": {
+      "main": [
+        [
+          {
+            "node": "Read RSS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch JSON": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "81134e92-1d9a-4828-a9e4-ca26cad2a274",
+  "meta": {
+    "instanceId": "dba21ff984f04d75614e1fa501501b6fc997121a17294f66a85aeccc5c07bc22"
+  },
+  "nodeGroups": [],
+  "id": "2tK7OYMcRmcvJAYB",
+  "tags": []
+}

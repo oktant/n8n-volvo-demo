@@ -1,0 +1,367 @@
+{
+  "name": "Daily Tech News Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "8dbd5f53-a7b6-460f-8634-021dc1f5b485",
+      "name": "Every day 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -2816,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------- Settings ----------\n// Keyword weights: specific interests count more than generic buzzwords.\nconst KEYWORDS = {\n  'docker': 3, 'kubernetes': 3, 'k8s': 3, 'container': 3, 'containers': 3,\n  'vulnerability': 3, 'vulnerabilities': 3, 'cve': 3, 'exploit': 3, 'zero-day': 3,\n  'security': 2, 'rust': 2, 'linux': 2, 'open source': 2, 'open-source': 2,\n  'python': 2, 'typescript': 2, 'claude': 2,\n  'ai': 1, 'llm': 1, 'llms': 1, 'openai': 1,\n};\n\nconst HALF_LIFE_HOURS = 12;   // a story loses half its freshness every 12 hours\nconst MISSING_DATE_HOURS = 24; // treat stories without a date as a day old\nconst BUZZ_PER_SOURCE = 1.5;  // x1.5 for each extra source covering the same story\nconst MAX_PER_SOURCE = 5;\nconst MAX_STORIES = 20;\n\n// ---------- Helpers ----------\nconst STOPWORDS = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'its',\n  'are', 'was', 'has', 'have', 'how', 'why', 'what', 'new', 'now', 'after', 'over', 'about',\n  'says', 'will', 'can', 'just', 'more', 'than', 'your', 'you', 'out', 'not', 'but']);\n\nconst wordsOf = (text) => text.toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean);\n\n// Sum of keyword weights found in the title.\nconst relevanceOf = (title) => {\n  const lower = title.toLowerCase();\n  const words = new Set(wordsOf(title));\n  let total = 0;\n  for (const [k, w] of Object.entries(KEYWORDS)) {\n    if (k.includes(' ') ? lower.includes(k) : words.has(k)) total += w;\n  }\n  return total;\n};\n\n// 1.0 for brand new, 0.5 at HALF_LIFE_HOURS, 0.25 at twice that, ...\nconst freshnessOf = (published) => {\n  const ageHours = published\n    ? Math.max(0, (Date.now() - published) / 3.6e6)\n    : MISSING_DATE_HOURS;\n  return Math.pow(0.5, ageHours / HALF_LIFE_HOURS);\n};\n\n// HN/Lobsters points as a gentle boost: 10 -> x1.35, 100 -> x1.67, 1000 -> x2. RSS -> x1.\nconst popularityOf = (points) =>\n  points == null ? 1 : 1 + Math.log10(points + 1) / 3;\n\nconst toTime = (value) => {\n  const t = Date.parse(value);\n  return Number.isNaN(t) ? null : t;\n};\n\n// Significant words used to spot the same story across sources.\nconst keyWordsOf = (title) =>\n  new Set(wordsOf(title).filter(w => w.length >= 3 && !STOPWORDS.has(w)));\n\nconst isSameStory = (a, b) => {\n  let shared = 0;\n  for (const w of a) if (b.has(w)) shared++;\n  return shared >= 3 && shared / Math.min(a.size, b.size) >= 0.5;\n};\n\n// ---------- Collect ----------\n// Each item from \"Fetch source\" is either a story or a failure marker.\nconst expected = $('Source list').all().map(i => i.json.name);\nconst stories = [];\nconst errors = {};\n\n$input.all().forEach((item, index) => {\n  const j = item.json || {};\n  if (j.failed) {\n    errors[j.source] = j.error;\n  } else if (j.error) {\n    // The sub-workflow itself crashed: find which source it was for.\n    const p = Array.isArray(item.pairedItem) ? item.pairedItem[0] : item.pairedItem;\n    const name = expected[p?.item ?? -1] || 'Unknown source';\n    errors[name] = typeof j.error === 'string' ? j.error : (j.error.message || 'Sub-workflow failed');\n  } else if (j.title && j.url && j.source) {\n    stories.push(j);\n  }\n});\n\n// A source counts as failed if none of its stories arrived.\nconst delivered = new Set(stories.map(s => s.source));\nconst failed = expected.filter(name => !delivered.has(name));\nconst failedDetails = failed.map(name => ({ source: name, error: errors[name] || 'No stories returned' }));\n\n// ---------- Score each story ----------\nconst seenUrls = new Set();\nconst candidates = [];\nfor (const s of stories) {\n  if (!s.title || !s.url || seenUrls.has(s.url)) continue;\n  seenUrls.add(s.url);\n  const relevance = relevanceOf(s.title);\n  if (relevance === 0) continue; // not about your interests\n  candidates.push({\n    ...s,\n    relevance,\n    freshness: freshnessOf(s.published),\n    popularity: popularityOf(s.points),\n    keyWords: keyWordsOf(s.title),\n  });\n}\n\n// ---------- Group the same story across sources ----------\nconst clusters = [];\nfor (const c of candidates) {\n  const match = clusters.find(cl => cl.members.some(m => isSameStory(m.keyWords, c.keyWords)));\n  if (match) match.members.push(c);\n  else clusters.push({ members: [c] });\n}\n\nconst ranked = clusters.map(({ members }) => {\n  // Best individual story represents the group.\n  const base = (m) => m.relevance * m.freshness * m.popularity;\n  const lead = members.reduce((a, b) => (base(b) > base(a) ? b : a));\n  const sources = [...new Set(members.map(m => m.source))];\n\n  const relevance = Math.max(...members.map(m => m.relevance));\n  const freshness = Math.max(...members.map(m => m.freshness));\n  const popularity = Math.max(...members.map(m => m.popularity));\n  const buzz = Math.pow(BUZZ_PER_SOURCE, sources.length - 1);\n\n  return {\n    title: lead.title,\n    url: lead.url,\n    source: [lead.source, ...sources.filter(s => s !== lead.source)].join(' + '),\n    leadSource: lead.source,\n    score: Math.round(relevance * freshness * popularity * buzz * 100) / 100,\n    breakdown: {\n      relevance,\n      freshness: Math.round(freshness * 100) / 100,\n      popularity: Math.round(popularity * 100) / 100,\n      buzz: Math.round(buzz * 100) / 100,\n    },\n    published: lead.published ? new Date(lead.published).toISOString() : null,\n    alsoAt: members.filter(m => m !== lead).map(m => m.url),\n  };\n});\n\n// ---------- Pick the top stories ----------\nranked.sort((a, b) => b.score - a.score);\n\nconst perSource = {};\nconst top = [];\nfor (const s of ranked) {\n  const n = perSource[s.leadSource] || 0;\n  if (n >= MAX_PER_SOURCE) continue;\n  perSource[s.leadSource] = n + 1;\n  top.push(s);\n  if (top.length >= MAX_STORIES) break;\n}\n\nreturn [{ json: { count: top.length, stories: top, failed, failedDetails } }];\n"
+      },
+      "id": "a2c52bc2-9822-4859-a952-303605b360da",
+      "name": "Filter and Rank",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2048,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b2000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e1d62b81-1e4b-4800-8ad7-425674f3e9cd",
+      "name": "Any stories?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1792,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openRouterApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Title",
+              "value": "Tech Digest"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'nvidia/nemotron-3-ultra-550b-a55b:free', max_tokens: 3000, reasoning: { exclude: true }, messages: [{ role: 'user', content: 'You are curating a daily tech news digest for a developer interested in AI, Docker, security and open source. From the stories below, pick up to 10 of the most relevant. Return ONLY a JSON array like [{\"id\": 3, \"summary\": \"One sentence.\"}], where id is the story id from the list and summary is one short sentence on why it matters to a developer. Do not restate the title. No other text, no markdown, no explanation.\\n\\n' + JSON.stringify($json.stories.map((s, i) => ({ id: i + 1, title: s.title, source: s.source }))) }] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "5a6737b4-19c7-4bf9-b7b1-d761228a95e3",
+      "name": "LLM summarize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1536,
+        448
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "openRouterApi": {
+          "id": "piBnPz7WhybU0vDx",
+          "name": "OpenRouter account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const { stories } = $('Filter and Rank').first().json;\nlet content = $input.first().json.choices?.[0]?.message?.content || '';\n\n// Drop any reasoning the model wrapped in <think> tags.\ncontent = content.replace(/<think>[\\s\\S]*?<\\/think>/g, '');\n\n// Find the last valid JSON array of picks in the reply.\nconst parsePicks = (text) => {\n  const end = text.lastIndexOf(']');\n  if (end === -1) return null;\n  let start = text.lastIndexOf('[', end);\n  while (start !== -1) {\n    try {\n      const arr = JSON.parse(text.slice(start, end + 1));\n      if (Array.isArray(arr) && arr.length && arr.every(p => p && p.id && p.summary)) return arr;\n    } catch (e) {}\n    if (start === 0) break;\n    start = text.lastIndexOf('[', start - 1);\n  }\n  return null;\n};\n\nconst used = new Set();\nconst picks = (parsePicks(content) || [])\n  .map(p => ({ story: stories[Number(p.id) - 1], summary: String(p.summary).trim() }))\n  .filter(p => p.story && !used.has(p.story.url) && used.add(p.story.url))\n  .slice(0, 10);\n\nlet body;\nif (picks.length) {\n  body = picks\n    .map((p, i) => `${i + 1}. ${p.story.title} (${p.story.source})\\n${p.summary}\\n${p.story.url}`)\n    .join('\\n\\n');\n} else {\n  // LLM failed, was cut off, or returned junk: send the plain list instead.\n  body = stories\n    .map((s, i) => `${i + 1}. ${s.title} (${s.source})\\n${s.url}`)\n    .join('\\n\\n');\n}\n\nconst date = new Date().toLocaleDateString('sv-SE');\nreturn [{ json: { subject: `Tech digest ${date}`, text: body } }];"
+      },
+      "id": "613040ca-6ae6-4cbb-85a4-47491dbba15c",
+      "name": "Format message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1264,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "oktay.alizada@necais.com",
+        "toEmail": "oktay.alizada@necais.com",
+        "subject": "={{ $json.subject }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.mailjet",
+      "typeVersion": 1,
+      "position": [
+        -1024,
+        448
+      ],
+      "id": "1a67f6e4-8c9f-47d2-b267-6b4bff44c4c7",
+      "name": "Send an email",
+      "credentials": {
+        "mailjetEmailApi": {
+          "id": "q5FKbhTDfG5o1zwe",
+          "name": "Mailjet Email account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "oktay.alizada@necais.com",
+        "toEmail": "oktay.alizada@necais.com",
+        "subject": "=Tech digest {{ new Date().toLocaleDateString('sv-SE') }}: some sources failed",
+        "text": "={{ 'These sources failed today:\\n' + $json.failedDetails.map(f => '- ' + f.source + ': ' + f.error).join('\\n') + '\\n\\nThe digest was still sent using the other sources.' }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.mailjet",
+      "typeVersion": 1,
+      "position": [
+        -1536,
+        960
+      ],
+      "id": "b7a0c04a-c6a2-4c47-9f1b-aabb7d2cf862",
+      "name": "Send warning",
+      "credentials": {
+        "mailjetEmailApi": {
+          "id": "q5FKbhTDfG5o1zwe",
+          "name": "Mailjet Email account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c3000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.failed.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "c3000000-0000-4000-8000-000000000002",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ac9f64bd-23a0-4cee-a153-7065b557fb69",
+      "name": "Partial failure?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1792,
+        960
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn [\n  { name: 'Hacker News',  type: 'json', url: 'https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=30' },\n  { name: 'Lobsters',     type: 'json', url: 'https://lobste.rs/hottest.json' },\n  { name: 'TechCrunch',   type: 'rss',  url: 'https://techcrunch.com/feed/' },\n  { name: 'The Register', type: 'rss',  url: 'https://www.theregister.com/headlines.atom' },\n].map(json => ({ json }));"
+      },
+      "id": "38f37fdf-e6cb-4618-84d1-c5c53f9a73e9",
+      "name": "Source list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2560,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "2tK7OYMcRmcvJAYB",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/2tK7OYMcRmcvJAYB",
+          "cachedResultName": "Fetch Source"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "eed1b6c9-096a-4500-b458-fb61ab25b2eb",
+      "name": "Fetch source",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -2304,
+        560
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every day 08:00": {
+      "main": [
+        [
+          {
+            "node": "Source list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter and Rank": {
+      "main": [
+        [
+          {
+            "node": "Any stories?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Partial failure?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any stories?": {
+      "main": [
+        [
+          {
+            "node": "LLM summarize",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "LLM summarize": {
+      "main": [
+        [
+          {
+            "node": "Format message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format message": {
+      "main": [
+        [
+          {
+            "node": "Send an email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Partial failure?": {
+      "main": [
+        [
+          {
+            "node": "Send warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Source list": {
+      "main": [
+        [
+          {
+            "node": "Fetch source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch source": {
+      "main": [
+        [
+          {
+            "node": "Filter and Rank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "47eda97d-2915-46a6-9e14-d8089fc1c867",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "dba21ff984f04d75614e1fa501501b6fc997121a17294f66a85aeccc5c07bc22"
+  },
+  "nodeGroups": [],
+  "id": "SgGSOVu0dKAjqk8u",
+  "tags": []
+}
