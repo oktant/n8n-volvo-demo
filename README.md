@@ -105,30 +105,8 @@ Illustrative numbers. Sorted by upvotes alone, the 800-point Rust story would ha
 | --- | --- |
 | Everything works | Digest email |
 | One source fails, stories still found | Digest, plus a separate warning email |
-| Sources fail and no stories come through | Stop and Error, then the error workflow emails you |
 | All sources work, nothing matches | Ends silently: a quiet day is not a failure |
 
 Every source: three retries, continue on error, always output data.
 
 ---
-
-## Part 3: Lessons
-
-### Lessons learned
-
-- **Feeds block servers:** Reddit and Ars Technica rejected server requests. Plan for sources to disappear.
-- **Node names are code:** Code nodes look nodes up by name. A pasted copy became "The Register RSS1" and silently broke.
-- **Free models think out loud:** One model wrote its reasoning into the email. Ask for JSON and parse it.
-- **Keep the LLM's job small:** Let it choose and summarize; let code handle titles, links and layout.
-
-### Where to take it next
-
-- **Summarize real content:** Pass each article's RSS snippet to the LLM, not just the title.
-- **Learn from clicks:** Track which links get opened and tune the weights.
-- **Reuse the pattern:** Fetch, rank, summarize, deliver: it works for releases, CVEs or competitor news.
-
----
-
-## Questions?
-
-Oktay Alizada · github.com/oktant
